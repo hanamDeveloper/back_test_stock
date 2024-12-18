@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>S&P500 & UPRO Backtest (라인차트 시각화)</title>
+  <!-- Papa Parse CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h1>S&P500 - UPRO 백테스트 (라인차트 시각화)</h1>
+
+  <div>
+    <label>S&P 500 CSV 업로드: </label>
+    <input type="file" id="spFile" accept=".csv" />
+  </div>
+  <div>
+    <label>UPRO CSV 업로드: </label>
+    <input type="file" id="uproFile" accept=".csv" />
+  </div>
+
+  <!-- 월별 적립액 & 초기자본 & dipMultiplier -->
+  <div>
+    <label>월별 적립액 (USD): </label>
+    <input type="number" id="monthlyInput" value="100" />
+  </div>
+  <div>
+    <label>초기 자본 (USD): </label>
+    <input type="number" id="initialCapitalInput" value="100" />
+  </div>
+  <div>
+    <label>하락분 배수(dipMultiplier): </label>
+    <input type="number" id="dipMultiplierInput" value="1" step="0.1" />
+  </div>
+
+  <button id="runButton">전략 실행하기</button>
+  <hr />
+
+  <h3>결과</h3>
+  <div id="result"></div>
+  
+  <!-- 차트 영역 -->
+  <canvas id="myChart" style="width:100%; max-width:800px; height:400px;"></canvas>
+  
+  <!-- 테이블 -->
+  <table id="logTable" border="1" style="margin-top: 20px; border-collapse: collapse;">
+    <thead>
+      <tr>
+        <th>날짜</th>
+        <th>전략 자산</th>
+        <th>전략 수익률(%)</th>
+        <th>SP Only 자산</th>
+        <th>SP Only 수익률(%)</th>
+        <th>UPRO Only 자산</th>
+        <th>UPRO Only 수익률(%)</th>
+        <th>메모</th>
+      </tr>
+    </thead>
+    <tbody id="logTableBody"></tbody>
+  </table>
+
+  <script>
+    // -----------------------------
+    // 1) CSV 파싱
+    // -----------------------------
+    function parseCSVFile(file) {
+      return new Promise((resolve, reject) => {
+        Papa.parse(file, {
+          header: true,
+          dynamicTyping: false,
+          skipEmptyLines: true,
+          complete: (results) => {
+            if (results.errors && results.errors.length > 0) {
+              reject(results.errors);
+            } else {
+              resolve(results.data);
+            }
+          },
+          error: (err) => {
+            reject(err);
+          }
+        });
+      });
+    }
+
+    // -----------------------------
+    // 2) 날짜 교집합 빌드
+    // -----------------------------
+    function buildMatchedData(spData, uproData) {
+      const spMap = {};
+      spData.forEach(row => {
+        const dateStr = row["날짜"];
+        if (!dateStr) return;
+        const rawClose = row["종가"];
+        const closeVal = parseFloat(rawClose.replace(/,/g, ""));
+        if (!isNaN(closeVal)) {
+          spMap[dateStr.trim()] = closeVal;
+        }
+      });
+
+      const uproMap = {};
+      uproData.forEach(row => {
+        const dateStr = row["날짜"];
+        if (!dateStr) return;
+        const rawClose = row["종가"];
+        const closeVal = parseFloat(rawClose.replace(/,/g, ""));
+        if (!isNaN(closeVal)) {
+          uproMap[dateStr.trim()] = closeVal;
+        }
+      });
+
+      const matchedData = [];
+      for (const date in spMap) {
+        if (uproMap[date] !== undefined) {
+          matchedData.push({
+            날짜: date,
+            spClose: spMap[date],
+            uproClose: uproMap[date]
+          });
+        }
+      }
+      matchedData.sort((a, b) => new Date(a.날짜) - new Date(b.날짜));
+      return matchedData;
+    }
+
+    /**
+     * 3) 백테스트 로직
+     * - 하락 시: 하락분($) * dipMultiplier 만큼 UPRO에 이동
+     * - 직전고점 회복 시: UPRO 전액을 S&P로 이동
+     * - SP Only / UPRO Only도 동일 월별 적립
+     */
+    function runStrategy(matchedData, initialCapital, monthlyContribution, dipMultiplier) {
+      // A) 전략(Strategy)
+      let spValue = initialCapital;
+      let uproValue = 0;
+      let totalContributed = initialCapital; 
+      let dipStartPrice = null; 
+      let prevMonth = null;
+
+      // B) SP Only
+      let spOnlyValue = initialCapital;
+      let spOnlyContributed = initialCapital;
+
+      // C) UPRO Only
+      let uproOnlyValue = initialCapital;
+      let uproOnlyContributed = initialCapital;
+
+      const dailyLog = [];
+
+      for (let i = 1; i < matchedData.length; i++) {
+        const today = matchedData[i].날짜;
+        const prevSpClose  = matchedData[i - 1].spClose;
+        const currSpClose  = matchedData[i].spClose;
+        const prevUproClose = matchedData[i - 1].uproClose;
+        const currUproClose = matchedData[i].uproClose;
+
+        // YYYY-MM 판단
+        const currDateObj = new Date(today);
+        const yymm = `${currDateObj.getFullYear()}-${String(currDateObj.getMonth()+1).padStart(2, '0')}`;
+
+        // 1) 월별 적립(Strategy)
+        if (prevMonth && yymm !== prevMonth) {
+          spValue += monthlyContribution;
+          totalContributed += monthlyContribution;
+        }
+
+        // 2) 변동 반영(Strategy)
+        spValue   *= (currSpClose / prevSpClose);
+        uproValue *= (currUproClose / prevUproClose);
+
+        let memo = "";
+
+        // 3) 하락 시 UPRO 이동(dipMultiplier)
+        const dailyChange = (currSpClose - prevSpClose) / prevSpClose;
+        if (dailyChange < 0) {
+          const absDollarLoss = spValue * Math.abs(dailyChange) * dipMultiplier;
+          spValue -= absDollarLoss;
+          uproValue += absDollarLoss;
+          memo = `하락분 x${dipMultiplier} → $${absDollarLoss.toFixed(2)} UPRO 이동`;
+
+          if (dipStartPrice === null) {
+            dipStartPrice = prevSpClose;
+            memo += ` (새 사이클 시작: ${dipStartPrice.toFixed(2)})`;
+          }
+        }
+
+        // 4) 직전고점 회복 시 리밸런싱
+        if (dipStartPrice !== null && currSpClose >= dipStartPrice) {
+          if (uproValue > 0) {
+            memo += memo ? " | " : "";
+            memo += `회복 → UPRO $${uproValue.toFixed(2)} 전액 S&P 이동`;
+            spValue += uproValue;
+            uproValue = 0;
+          }
+          dipStartPrice = null;
+        }
+
+        // SP Only
+        if (prevMonth && yymm !== prevMonth) {
+          spOnlyValue += monthlyContribution;
+          spOnlyContributed += monthlyContribution;
+        }
+        spOnlyValue *= (currSpClose / prevSpClose);
+
+        // UPRO Only
+        if (prevMonth && yymm !== prevMonth) {
+          uproOnlyValue += monthlyContribution;
+          uproOnlyContributed += monthlyContribution;
+        }
+        uproOnlyValue *= (currUproClose / prevUproClose);
+
+        // 날짜별 로그
+        const strategyTotal = spValue + uproValue;
+        const strategyProfitRate = ((strategyTotal - totalContributed) / totalContributed) * 100;
+        const spOnlyProfitRate = ((spOnlyValue - spOnlyContributed) / spOnlyContributed) * 100;
+        const uproOnlyProfitRate = ((uproOnlyValue - uproOnlyContributed) / uproOnlyContributed) * 100;
+
+        dailyLog.push({
+          날짜: today,
+          strategyTotal: strategyTotal.toFixed(2),
+          strategyProfitRate: strategyProfitRate.toFixed(2),
+          spOnlyValue: spOnlyValue.toFixed(2),
+          spOnlyProfitRate: spOnlyProfitRate.toFixed(2),
+          uproOnlyValue: uproOnlyValue.toFixed(2),
+          uproOnlyProfitRate: uproOnlyProfitRate.toFixed(2),
+          memo
+        });
+
+        prevMonth = yymm;
+      }
+
+      // 최종 결과
+      const finalStrategyValue = spValue + uproValue;
+      const finalStrategyProfit = ((finalStrategyValue - totalContributed)/ totalContributed)*100;
+
+      const finalSpOnlyProfit = ((spOnlyValue - spOnlyContributed) / spOnlyContributed)*100;
+      const finalUproOnlyProfit = ((uproOnlyValue - uproOnlyContributed) / uproOnlyContributed)*100;
+
+      return {
+        dailyLog,
+        finalStrategyValue,
+        finalStrategyProfit,
+        spOnlyValue,
+        spOnlyProfit: finalSpOnlyProfit,
+        uproOnlyValue,
+        uproOnlyProfit: finalUproOnlyProfit,
+        totalContributed
+      };
+    }
+
+    // 4) 메인 실행
+    document.getElementById("runButton").addEventListener("click", async () => {
+      const spFile = document.getElementById('spFile').files[0];
+      const uproFile = document.getElementById('uproFile').files[0];
+      const monthlyContribution = parseFloat(document.getElementById('monthlyInput').value);
+      const initialCapital = parseFloat(document.getElementById('initialCapitalInput').value);
+      const dipMultiplier = parseFloat(document.getElementById('dipMultiplierInput').value);
+
+      if (!spFile || !uproFile) {
+        alert("S&P500 CSV와 UPRO CSV를 모두 선택해주세요.");
+        return;
+      }
+      if (isNaN(monthlyContribution) || monthlyContribution < 0) {
+        alert("월별 적립액이 잘못 입력되었습니다.");
+        return;
+      }
+      if (isNaN(initialCapital) || initialCapital < 0) {
+        alert("초기 자본이 잘못 입력되었습니다.");
+        return;
+      }
+      if (isNaN(dipMultiplier) || dipMultiplier <= 0) {
+        alert("하락분 배수(dipMultiplier)가 잘못 입력되었습니다. 0보다 커야 합니다.");
+        return;
+      }
+
+      try {
+        // CSV 파싱
+        const spData = await parseCSVFile(spFile);
+        const uproData = await parseCSVFile(uproFile);
+
+        // 날짜 매칭
+        const matchedData = buildMatchedData(spData, uproData);
+        if (matchedData.length < 2) {
+          throw new Error("매칭된 날짜가 너무 적습니다(2개 미만).");
+        }
+
+        // 전략 실행
+        const result = runStrategy(matchedData, initialCapital, monthlyContribution, dipMultiplier);
+
+        // 최종 결과
+        const finalStrVal = result.finalStrategyValue.toFixed(2);
+        const finalStrProfit = result.finalStrategyProfit.toFixed(2);
+        const finalStrContrib = result.totalContributed.toFixed(2);
+
+        const spOnlyVal = result.spOnlyValue.toFixed(2);
+        const spOnlyProfit = result.spOnlyProfit.toFixed(2);
+
+        const uproOnlyVal = result.uproOnlyValue.toFixed(2);
+        const uproOnlyProfit = result.uproOnlyProfit.toFixed(2);
+
+        const resultDiv = document.getElementById("result");
+        resultDiv.innerHTML = `
+          <b>전략(Strategy) [dipMultiplier=${dipMultiplier}]</b><br>
+          - 최종 자산: $${finalStrVal} <br>
+          - 총 투자금: $${finalStrContrib} <br>
+          - 최종 수익률: ${finalStrProfit}% <br><br>
+
+          <b>SP Only (매월 적립)</b><br>
+          - 최종 자산: $${spOnlyVal} <br>
+          - 최종 수익률: ${spOnlyProfit}% <br><br>
+
+          <b>UPRO Only (매월 적립)</b><br>
+          - 최종 자산: $${uproOnlyVal}<br>
+          - 최종 수익률: ${uproOnlyProfit}%
+        `;
+
+        // -------------------------------
+        // (A) 테이블에 날짜별 수익률 출력
+        // -------------------------------
+        const tbody = document.getElementById("logTableBody");
+        tbody.innerHTML = '';
+        const dailyLog = result.dailyLog;
+        dailyLog.forEach(row => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${row.날짜}</td>
+            <td>${row.strategyTotal}</td>
+            <td>${row.strategyProfitRate}</td>
+            <td>${row.spOnlyValue}</td>
+            <td>${row.spOnlyProfitRate}</td>
+            <td>${row.uproOnlyValue}</td>
+            <td>${row.uproOnlyProfitRate}</td>
+            <td>${row.memo}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+
+        // -------------------------------
+        // (B) 차트.js로 라인 차트 시각화
+        // -------------------------------
+        const labels = dailyLog.map(d => d.날짜);
+        const strategyData   = dailyLog.map(d => parseFloat(d.strategyTotal));
+        const spOnlyData     = dailyLog.map(d => parseFloat(d.spOnlyValue));
+        const uproOnlyData   = dailyLog.map(d => parseFloat(d.uproOnlyValue));
+
+        // 차트가 이미 존재한다면 파괴하고 다시 그리기 (중복 실행 방지)
+        if (window.myChartInstance) {
+          window.myChartInstance.destroy();
+        }
+
+        const ctx = document.getElementById('myChart').getContext('2d');
+        window.myChartInstance = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels, // 날짜
+            outerHeight: 300,
+            innerHeight: 300,
+            datasets: [
+              {
+                label: `전략(Strategy)`,
+                data: strategyData,
+                borderColor: 'rgba(255, 99, 132, 1)',   // 빨간색
+                backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                fill: false
+              },
+              {
+                label: `SP Only`,
+                data: spOnlyData,
+                borderColor: 'rgba(54, 162, 235, 1)',    // 파란색
+                backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                fill: false
+              },
+              {
+                label: `UPRO Only`,
+                data: uproOnlyData,
+                borderColor: 'rgba(255, 206, 86, 1)',    // 노란색
+                backgroundColor: 'rgba(255, 206, 86, 0.2)',
+                fill: false
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            scales: {
+              x: {
+                title: { display: true, text: 'Date' },
+                ticks: {
+                  // 샘플: 라벨 숫자 너무 많으면 간격 조정
+                  // autoSkip: true, maxTicksLimit: 10
+                }
+              },
+              y: {
+                title: { display: true, text: 'Asset Value ($)' },
+                beginAtZero: false
+              }
+            },
+            plugins: {
+              legend: { position: 'top' },
+              title: { display: true, text: 'Daily Asset Value Comparison' }
+            }
+          }
+        });
+
+      } catch (error) {
+        console.error("에러 발생:", error);
+        alert("에러: " + error.message);
+      }
+    });
+  </script>
+</body>
+</html>
