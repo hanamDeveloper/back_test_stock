@@ -34,6 +34,16 @@
     <input type="number" id="dipMultiplierInput" value="1" step="0.1" />
   </div>
 
+  <!-- 여기에 날짜 선택 입력란 추가 -->
+  <div>
+    <label>시작일: </label>
+    <input type="date" id="startDate" />
+  </div>
+  <div>
+    <label>종료일: </label>
+    <input type="date" id="endDate" />
+  </div>
+
   <button id="runButton">전략 실행하기</button>
   <hr />
 
@@ -249,6 +259,17 @@
       };
     }
 
+    function filterDataByDate(matchedData, startDate, endDate) {
+      if (!startDate && !endDate) return matchedData;
+      
+      return matchedData.filter(row => {
+        const rowDate = new Date(row.날짜);
+        if (startDate && rowDate < new Date(startDate)) return false;
+        if (endDate && rowDate > new Date(endDate)) return false;
+        return true;
+      });
+    }
+
     // 4) 메인 실행
     document.getElementById("runButton").addEventListener("click", async () => {
       const spFile = document.getElementById('spFile').files[0];
@@ -256,21 +277,14 @@
       const monthlyContribution = parseFloat(document.getElementById('monthlyInput').value);
       const initialCapital = parseFloat(document.getElementById('initialCapitalInput').value);
       const dipMultiplier = parseFloat(document.getElementById('dipMultiplierInput').value);
+      
+      // 날짜 입력값 가져오기
+      const startDate = document.getElementById('startDate').value;
+      const endDate = document.getElementById('endDate').value;
 
-      if (!spFile || !uproFile) {
-        alert("S&P500 CSV와 UPRO CSV를 모두 선택해주세요.");
-        return;
-      }
-      if (isNaN(monthlyContribution) || monthlyContribution < 0) {
-        alert("월별 적립액이 잘못 입력되었습니다.");
-        return;
-      }
-      if (isNaN(initialCapital) || initialCapital < 0) {
-        alert("초기 자본이 잘못 입력되었습니다.");
-        return;
-      }
-      if (isNaN(dipMultiplier) || dipMultiplier <= 0) {
-        alert("하락분 배수(dipMultiplier)가 잘못 입력되었습니다. 0보다 커야 합니다.");
+      // 날짜 유효성 검사 추가
+      if (startDate && endDate && new Date(startDate) > new Date(endDate)) {
+        alert("시작일이 종료일보다 늦을 수 없습니다.");
         return;
       }
 
@@ -280,12 +294,18 @@
         const uproData = await parseCSVFile(uproFile);
 
         // 날짜 매칭
-        const matchedData = buildMatchedData(spData, uproData);
+        let matchedData = buildMatchedData(spData, uproData);
         if (matchedData.length < 2) {
           throw new Error("매칭된 날짜가 너무 적습니다(2개 미만).");
         }
 
-        // 전략 실행
+        // 날짜 필터링 적용
+        matchedData = filterDataByDate(matchedData, startDate, endDate);
+        if (matchedData.length < 2) {
+          throw new Error("선택된 기간에 데이터가 충분하지 않습니다(2개 미만).");
+        }
+
+        // 전략 실행 (필터링된 데이터 사용)
         const result = runStrategy(matchedData, initialCapital, monthlyContribution, dipMultiplier);
 
         // 최종 결과
@@ -386,8 +406,8 @@
               x: {
                 title: { display: true, text: 'Date' },
                 ticks: {
-                  // 샘플: 라벨 숫자 너무 많으면 간격 조정
-                  // autoSkip: true, maxTicksLimit: 10
+                  autoSkip: true,
+                  maxTicksLimit: 20
                 }
               },
               y: {

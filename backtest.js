@@ -113,4 +113,58 @@ async function main() {
   }
 }
 
+// 날짜 필터링 함수 추가
+function filterDataByDate(matchedData, startDate, endDate) {
+  if (!startDate && !endDate) return matchedData;
+  
+  return matchedData.filter(row => {
+    const rowDate = new Date(row.Date);
+    if (startDate && rowDate < new Date(startDate)) return false;
+    if (endDate && rowDate > new Date(endDate)) return false;
+    return true;
+  });
+}
+
+// 메인 실행 부분 수정
+document.getElementById("runButton").addEventListener("click", async () => {
+  const spFile = document.getElementById('spFile').files[0];
+  const uproFile = document.getElementById('uproFile').files[0];
+  const monthlyContribution = parseFloat(document.getElementById('monthlyInput').value);
+  const initialCapital = parseFloat(document.getElementById('initialCapitalInput').value);
+  const dipMultiplier = parseFloat(document.getElementById('dipMultiplierInput').value);
+  
+  // 날짜 입력값 가져오기
+  const startDate = document.getElementById('startDate').value;
+  const endDate = document.getElementById('endDate').value;
+
+  // 기존 유효성 검사에 날짜 검사 추가
+  if (startDate && endDate && new Date(startDate) > new Date(endDate)) {
+    alert("시작일이 종료일보다 늦을 수 없습니다.");
+    return;
+  }
+
+  try {
+    // CSV 파싱
+    const spData = await parseCSV(spFile);
+    const uproData = await parseCSV(uproFile);
+
+    // 날짜 매칭
+    let matchedData = buildMatchedData(spData, uproData);
+    if (matchedData.length < 2) {
+      throw new Error("매칭된 날짜가 너무 적습니다(2개 미만).");
+    }
+
+    // 날짜 필터링 적용
+    matchedData = filterDataByDate(matchedData, startDate, endDate);
+    if (matchedData.length < 2) {
+      throw new Error("선택된 기간에 데이터가 충분하지 않습니다(2개 미만).");
+    }
+
+    // 나머지 코드는 동일...
+
+  } catch (error) {
+    console.error('에러 발생:', error);
+  }
+});
+
 main();
